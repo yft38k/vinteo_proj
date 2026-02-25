@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const { Client, GatewayIntentBits } = require('discord.js');
 require('dotenv').config();
 
 const app = express();
@@ -12,156 +13,124 @@ const IMAGE_BOT_ID = process.env.IMAGE_BOT_ID || "1433976859741126678";
 const TEXT_BOT_ID = process.env.TEXT_BOT_ID || "1458637793076187186";
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const DISCORD_API_URL = "https://discord.com/api/v10";
+const GUILD_ID = process.env.DISCORD_GUILD_ID || "1430279545298227271";
+const CATEGORY_CLIENTS = "1458597097233191066";
+const CATEGORY_ADMIN = "1458112370747506758";
 
 if (!DISCORD_TOKEN) {
   console.error("❌ ERREUR: DISCORD_TOKEN manquant dans .env");
   process.exit(1);
 }
 
+// Initialize Discord.js client
+const discordClient = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages
+  ]
+});
+
+let discordReady = false;
+
+discordClient.once('ready', () => {
+  console.log(`✅ Discord client connecté: ${discordClient.user.tag}`);
+  discordReady = true;
+});
+
+discordClient.login(DISCORD_TOKEN).catch(err => {
+  console.error('❌ Erreur connexion Discord.js:', err.message);
+});
+
 app.use(cors());
 app.use(express.json());
+
+// ===== AUTHENTIFICATION =====
+// Stockage temporaire des codes (en mémoire)
+const verificationCodes = {};
+const sessions = {};
+// ===== FIN STOCKAGE =====
 
 app.use((req, res, next) => {
   console.log(`\n[${new Date().toLocaleTimeString()}] ${req.method} ${req.path}`);
   next();
 });
 
-// Route: Récupère le dernier message du bot IMAGE et sa dernière image
+// Route: Récupère la dernière image du salon utilisateur
 app.get('/api/images', async (req, res) => {
   try {
-    console.log('🔍 Recherche du dernier message du bot IMAGE...');
-    console.log(`   Channel ID: ${DISCORD_CHANNEL_ID}`);
-    console.log(`   Image Bot ID: ${IMAGE_BOT_ID}`);
-    
-    let allMessages = [];
-    let lastMessageId = null;
-    const limit = 100;
-
-    const headers = {
-      'Authorization': `Bot ${DISCORD_TOKEN}`,
-      'Content-Type': 'application/json'
-    };
-    
-    for (let iteration = 0; iteration < 10; iteration++) {
-      let url = `${DISCORD_API_URL}/channels/${DISCORD_CHANNEL_ID}/messages?limit=${limit}`;
-      
-      if (lastMessageId) {
-        url += `&before=${lastMessageId}`;
-      }
-      
-      console.log(`\n   📥 Batch ${iteration + 1}...`);
-      
-      try {
-        const response = await axios.get(url, {
-          headers: headers,
-          timeout: 5000
-        });
-
-        const messages = response.data;
-        
-        if (!messages || messages.length === 0) {
-          console.log(`   ✓ Fin atteinte`);
-          break;
-        }
-
-        const botMessages = messages.filter(msg => msg.author.id === IMAGE_BOT_ID);
-        console.log(`   📨 ${botMessages.length}/${messages.length} messages du bot IMAGE`);
-        
-        allMessages = allMessages.concat(botMessages);
-
-        lastMessageId = messages[messages.length - 1].id;
-        
-        if (allMessages.length >= 1000) {
-          console.log(`   ⚠️ Limite de 1000 messages atteinte`);
-          break;
-        }
-
-      } catch (error) {
-        console.error(`   ❌ Erreur batch:`, error.message);
-        if (error.response?.status === 401) {
-          throw new Error("❌ Token Discord invalide");
-        }
-        throw error;
-      }
+    // Vérification de l'authentification
+    const token = req.headers['authorization']?.replace('Bearer ', '') || req.query.token;
+    if (!token) {
+      return res.status(401).json({ success: false, error: 'Non authentifié' });
+    }
+    const session = sessions[token];
+    if (!session || Date.now() - session.createdAt > 24 * 60 * 60 * 1000) {
+      if (session) delete sessions[token];
+      return res.status(401).json({ success: false, error: 'Session expirée ou invalide' });
     }
 
-    console.log(`\n   📊 Total: ${allMessages.length} messages du bot IMAGE`);
+    const { username } = session;
+    console.log(`🔍 Recherche image pour salon-${username}...`);
 
-    if (allMessages.length === 0) {
-      console.log('   ❌ Aucun message du bot IMAGE trouvé');
-      return res.json({ 
-        success: false, 
-        message: "Aucun message du bot IMAGE trouvé" 
-      });
+    const channel = await getUserChannel(username);
+    if (!channel) {
+      return res.json({ success: false, message: `Salon salon-${username} non trouvé` });
     }
 
-    allMessages.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    const latestMessage = allMessages[0];
+    console.log(`   📢 Salon trouvé: ${channel.name} (${channel.id})`);
 
-    console.log(`\n   📌 Dernier message: ${latestMessage.id}`);
-    console.log(`   ⏰ Date: ${latestMessage.timestamp}`);
+    const messages = await channel.messages.fetch({ limit: 100 });
+
+    const imageBotMessages = messages
+      .filter(msg =>
+        msg.author.id === IMAGE_BOT_ID &&
+        (msg.attachments.size > 0 || msg.embeds.length > 0 || extractImageUrls(msg.content).length > 0)
+      )
+      .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+
+    if (imageBotMessages.size === 0) {
+      return res.json({ success: false, message: 'Aucune image trouvée' });
+    }
+
+    const latestMessage = imageBotMessages.first();
+    console.log(`   📌 Dernier message image: ${latestMessage.id}`);
 
     const imageUrls = extractImageUrls(latestMessage.content);
-    console.log(`   🔗 URLs trouvées dans le contenu: ${imageUrls.length}`);
-    
-    if (latestMessage.embeds && latestMessage.embeds.length > 0) {
-      console.log(`   📦 Embeds: ${latestMessage.embeds.length}`);
-      latestMessage.embeds.forEach(embed => {
-        if (embed.image && embed.image.url) {
-          imageUrls.push(embed.image.url);
-        }
-        if (embed.thumbnail && embed.thumbnail.url) {
-          imageUrls.push(embed.thumbnail.url);
-        }
-      });
-    }
 
-    if (latestMessage.attachments && latestMessage.attachments.length > 0) {
-      console.log(`   📎 Attachments: ${latestMessage.attachments.length}`);
-      latestMessage.attachments.forEach(att => {
-        imageUrls.push(att.url);
-      });
-    }
+    latestMessage.embeds.forEach(embed => {
+      if (embed.image?.url) imageUrls.push(embed.image.url);
+      if (embed.thumbnail?.url) imageUrls.push(embed.thumbnail.url);
+    });
 
-    console.log(`   🎯 Total URLs: ${imageUrls.length}`);
+    latestMessage.attachments.forEach(att => {
+      imageUrls.push(att.url);
+    });
 
     if (imageUrls.length === 0) {
-      console.log('   ❌ Aucune image trouvée');
-      return res.json({ 
-        success: false, 
-        message: "Aucune image trouvée" 
-      });
+      return res.json({ success: false, message: 'Aucune image trouvée' });
     }
 
     const lastImageUrl = imageUrls[imageUrls.length - 1];
-    console.log(`   📸 Dernière image sélectionnée`);
-
-    console.log('\n   ⬇️ Téléchargement de l\'image...');
     const images = await downloadImages([lastImageUrl]);
-    
+
     if (images.length === 0) {
-      console.log('   ❌ Erreur téléchargement');
-      throw new Error("Erreur téléchargement");
+      throw new Error('Erreur téléchargement');
     }
 
     console.log(`   ✅ Image téléchargée (${images[0].filename})`);
 
-    console.log('\n   ✅ SUCCÈS!\n');
-
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       messageId: latestMessage.id,
       count: 1,
       images: images
     });
 
   } catch (error) {
-    console.error('\n   ❌ ERREUR COMPLÈTE:', error.message);
-    console.error(error.stack);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    console.error('\n   ❌ ERREUR /api/images:', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -273,6 +242,63 @@ app.get('/api/text', async (req, res) => {
   }
 });
 
+// Route: Récupère le dernier texte du salon utilisateur
+app.get('/api/textes', async (req, res) => {
+  try {
+    // Vérification de l'authentification
+    const token = req.headers['authorization']?.replace('Bearer ', '') || req.query.token;
+    if (!token) {
+      return res.status(401).json({ success: false, error: 'Non authentifié' });
+    }
+    const session = sessions[token];
+    if (!session || Date.now() - session.createdAt > 24 * 60 * 60 * 1000) {
+      if (session) delete sessions[token];
+      return res.status(401).json({ success: false, error: 'Session expirée ou invalide' });
+    }
+
+    const { username } = session;
+    console.log(`🔍 Recherche texte pour salon-${username}...`);
+
+    const channel = await getUserChannel(username);
+    if (!channel) {
+      return res.json({ success: false, message: `Salon salon-${username} non trouvé` });
+    }
+
+    console.log(`   📢 Salon trouvé: ${channel.name} (${channel.id})`);
+
+    const messages = await channel.messages.fetch({ limit: 100 });
+
+    const textBotMessages = messages
+      .filter(msg =>
+        msg.author.id === TEXT_BOT_ID &&
+        msg.content && msg.content.trim().length > 0
+      )
+      .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+
+    if (textBotMessages.size === 0) {
+      return res.json({ success: false, message: 'Aucun texte trouvé' });
+    }
+
+    const latestMessage = textBotMessages.first();
+    console.log(`   📌 Dernier message texte: ${latestMessage.id}`);
+
+    const lines = latestMessage.content.split('\n');
+    const title = lines[0].trim();
+    const description = lines.slice(1).join('\n').trim();
+
+    res.json({
+      success: true,
+      messageId: latestMessage.id,
+      title: title,
+      description: description
+    });
+
+  } catch (error) {
+    console.error('\n   ❌ ERREUR /api/textes:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Route: Test
 app.get('/api/test', async (req, res) => {
   try {
@@ -305,6 +331,17 @@ app.get('/api/test', async (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK' });
 });
+
+// Helper: Trouve le salon salon-{username} dans les catégories
+async function getUserChannel(username) {
+  const guild = await discordClient.guilds.fetch(GUILD_ID);
+  await guild.channels.fetch();
+  const channelName = `salon-${username}`;
+  return guild.channels.cache.find(ch =>
+    ch.name === channelName &&
+    (ch.parentId === CATEGORY_CLIENTS || ch.parentId === CATEGORY_ADMIN)
+  ) || null;
+}
 
 function extractImageUrls(text) {
   if (!text) return [];
@@ -400,10 +437,6 @@ app.listen(PORT, () => {
 
 // ===== AUTHENTIFICATION =====
 
-// Stockage temporaire des codes (en mémoire)
-const verificationCodes = {};
-const sessions = {};
-
 // Route: Envoyer code de vérification
 app.post('/send-verification-code', async (req, res) => {
   try {
@@ -414,22 +447,30 @@ app.post('/send-verification-code', async (req, res) => {
     }
 
     console.log(`📧 Envoi de code pour Discord ID: ${discordId}`);
-    
+
+    // Récupère les infos de l'utilisateur Discord
+    const discordUser = await discordClient.users.fetch(discordId);
+    const username = discordUser.username;
+
     // Génère un code aléatoire 6 chiffres
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     
-    // Stocke le code (valide 10 minutes)
+    // Stocke le code avec le pseudo (valide 10 minutes)
     verificationCodes[discordId] = {
       code: code,
+      username: username,
       expiresAt: Date.now() + 10 * 60 * 1000
     };
 
-    console.log(`✅ Code généré: ${code}`);
+    // Envoie le code par DM Discord via le bot
+    await discordUser.send(`🔐 Ton code de vérification Vinteo Import: **${code}**\n\nCe code est valide pendant 10 minutes.`);
+
+    console.log(`✅ Code envoyé par DM à ${username} (${discordId})`);
 
     res.json({ 
       success: true, 
-      message: 'Code envoyé (pour test: ' + code + ')',
-      code: code // Pour test en développement
+      message: 'Code envoyé par DM Discord',
+      username: username
     });
 
   } catch (error) {
@@ -468,7 +509,7 @@ app.post('/verify-code', async (req, res) => {
     const token = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     sessions[token] = {
       discordId: discordId,
-      username: `User${discordId.slice(-4)}`,
+      username: stored.username,
       createdAt: Date.now()
     };
 
@@ -480,7 +521,8 @@ app.post('/verify-code', async (req, res) => {
       success: true, 
       message: 'Connecté!',
       token: token,
-      username: sessions[token].username
+      username: sessions[token].username,
+      discordId: discordId
     });
 
   } catch (error) {
