@@ -396,3 +396,152 @@ app.listen(PORT, () => {
   console.log(`🔗 Test: http://localhost:${PORT}/api/test`);
   console.log(`${'='.repeat(60)}\n`);
 });
+
+
+// ===== AUTHENTIFICATION =====
+
+// Stockage temporaire des codes (en mémoire)
+const verificationCodes = {};
+const sessions = {};
+
+// Route: Envoyer code de vérification
+app.post('/send-verification-code', async (req, res) => {
+  try {
+    const { discordId } = req.body;
+    
+    if (!discordId) {
+      return res.status(400).json({ success: false, error: 'Discord ID manquant' });
+    }
+
+    console.log(`📧 Envoi de code pour Discord ID: ${discordId}`);
+    
+    // Génère un code aléatoire 6 chiffres
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    // Stocke le code (valide 10 minutes)
+    verificationCodes[discordId] = {
+      code: code,
+      expiresAt: Date.now() + 10 * 60 * 1000
+    };
+
+    console.log(`✅ Code généré: ${code}`);
+
+    res.json({ 
+      success: true, 
+      message: 'Code envoyé (pour test: ' + code + ')',
+      code: code // Pour test en développement
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur send-verification-code:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Route: Vérifier le code
+app.post('/verify-code', async (req, res) => {
+  try {
+    const { discordId, code } = req.body;
+    
+    if (!discordId || !code) {
+      return res.status(400).json({ success: false, error: 'Discord ID ou code manquant' });
+    }
+
+    console.log(`🔐 Vérification du code pour: ${discordId}`);
+    
+    const stored = verificationCodes[discordId];
+    
+    if (!stored) {
+      return res.json({ success: false, error: 'Pas de code trouvé. Renvoie un code d\'abord.' });
+    }
+
+    if (Date.now() > stored.expiresAt) {
+      delete verificationCodes[discordId];
+      return res.json({ success: false, error: 'Code expiré' });
+    }
+
+    if (stored.code !== code) {
+      return res.json({ success: false, error: 'Code incorrect' });
+    }
+
+    // Code correct! Génère une session
+    const token = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    sessions[token] = {
+      discordId: discordId,
+      username: `User${discordId.slice(-4)}`,
+      createdAt: Date.now()
+    };
+
+    delete verificationCodes[discordId];
+
+    console.log(`✅ Code vérifié! Token: ${token}`);
+
+    res.json({ 
+      success: true, 
+      message: 'Connecté!',
+      token: token,
+      username: sessions[token].username
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur verify-code:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Route: Vérifier la session
+app.post('/check-session', async (req, res) => {
+  try {
+    const { token } = req.body;
+    
+    if (!token) {
+      return res.json({ authenticated: false, error: 'Token manquant' });
+    }
+
+    console.log(`🔍 Vérification de session: ${token}`);
+    
+    const session = sessions[token];
+    
+    if (!session) {
+      return res.json({ authenticated: false, error: 'Token invalide' });
+    }
+
+    // Token valide pendant 24h
+    if (Date.now() - session.createdAt > 24 * 60 * 60 * 1000) {
+      delete sessions[token];
+      return res.json({ authenticated: false, error: 'Token expiré' });
+    }
+
+    console.log(`✅ Session valide pour: ${session.username}`);
+
+    res.json({ 
+      authenticated: true, 
+      username: session.username,
+      discordId: session.discordId
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur check-session:', error.message);
+    res.status(500).json({ authenticated: false, error: error.message });
+  }
+});
+
+// Route: Logout
+app.post('/logout', async (req, res) => {
+  try {
+    const { token } = req.body;
+    
+    if (token && sessions[token]) {
+      delete sessions[token];
+      console.log(`👋 Logout: ${token}`);
+    }
+
+    res.json({ success: true, message: 'Logout réussi' });
+
+  } catch (error) {
+    console.error('❌ Erreur logout:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ===== FIN AUTHENTIFICATION =====
