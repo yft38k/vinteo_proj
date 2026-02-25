@@ -14,8 +14,11 @@ const TEXT_BOT_ID = process.env.TEXT_BOT_ID || "1458637793076187186";
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const DISCORD_API_URL = "https://discord.com/api/v10";
 const GUILD_ID = process.env.DISCORD_GUILD_ID || "1430279545298227271";
+const SERVER_ID = GUILD_ID;
+const ROLE_ID = "1458129484036313118";
 const CATEGORY_CLIENTS = "1458597097233191066";
 const CATEGORY_ADMIN = "1458112370747506758";
+const CATEGORIES = { clients: CATEGORY_CLIENTS, admin: CATEGORY_ADMIN };
 
 if (!DISCORD_TOKEN) {
   console.error("❌ ERREUR: DISCORD_TOKEN manquant dans .env");
@@ -48,9 +51,23 @@ app.use(express.json());
 
 // ===== AUTHENTIFICATION =====
 // Stockage temporaire des codes (en mémoire)
-const verificationCodes = {};
-const sessions = {};
+const verificationCodes = new Map();
+const sessions = new Map();
 // ===== FIN STOCKAGE =====
+
+// Middleware: Vérification de session
+function verifySession(req, res, next) {
+  const token = req.headers['authorization']?.replace('Bearer ', '') || req.query.token;
+  if (!token) {
+    return res.status(401).json({ success: false, error: 'Non authentifié' });
+  }
+  const session = sessions.get(token);
+  if (!session) {
+    return res.status(401).json({ success: false, error: 'Session invalide' });
+  }
+  req.session = session;
+  next();
+}
 
 app.use((req, res, next) => {
   console.log(`\n[${new Date().toLocaleTimeString()}] ${req.method} ${req.path}`);
@@ -58,19 +75,9 @@ app.use((req, res, next) => {
 });
 
 // Route: Récupère la dernière image du salon utilisateur
-app.get('/api/images', async (req, res) => {
+app.get('/api/images', verifySession, async (req, res) => {
   try {
-    // Vérification de l'authentification
-    const token = req.headers['authorization']?.replace('Bearer ', '') || req.query.token;
-    if (!token) {
-      return res.status(401).json({ success: false, error: 'Non authentifié' });
-    }
-    const session = sessions[token];
-    if (!session) {
-      return res.status(401).json({ success: false, error: 'Session invalide' });
-    }
-
-    const { username } = session;
+    const { username } = req.session;
     console.log(`🔍 Recherche image pour salon-${username}...`);
 
     const channel = await getUserChannel(username);
@@ -134,19 +141,9 @@ app.get('/api/images', async (req, res) => {
 });
 
 // Route: Récupère le dernier texte du salon utilisateur
-app.get('/api/text', async (req, res) => {
+app.get('/api/text', verifySession, async (req, res) => {
   try {
-    // Vérification de l'authentification
-    const token = req.headers['authorization']?.replace('Bearer ', '') || req.query.token;
-    if (!token) {
-      return res.status(401).json({ success: false, error: 'Non authentifié' });
-    }
-    const session = sessions[token];
-    if (!session) {
-      return res.status(401).json({ success: false, error: 'Session invalide' });
-    }
-
-    const { username } = session;
+    const { username } = req.session;
     console.log(`🔍 Recherche texte pour salon-${username}...`);
 
     const channel = await getUserChannel(username);
@@ -193,19 +190,9 @@ app.get('/api/text', async (req, res) => {
 });
 
 // Route: Récupère le dernier texte du salon utilisateur (alias)
-app.get('/api/textes', async (req, res) => {
+app.get('/api/textes', verifySession, async (req, res) => {
   try {
-    // Vérification de l'authentification
-    const token = req.headers['authorization']?.replace('Bearer ', '') || req.query.token;
-    if (!token) {
-      return res.status(401).json({ success: false, error: 'Non authentifié' });
-    }
-    const session = sessions[token];
-    if (!session) {
-      return res.status(401).json({ success: false, error: 'Session invalide' });
-    }
-
-    const { username } = session;
+    const { username } = req.session;
     console.log(`🔍 Recherche texte pour salon-${username}...`);
 
     const channel = await getUserChannel(username);
@@ -405,11 +392,11 @@ app.post('/send-verification-code', async (req, res) => {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     
     // Stocke le code avec le pseudo (valide 10 minutes)
-    verificationCodes[discordId] = {
+    verificationCodes.set(discordId, {
       code: code,
       username: username,
       expiresAt: Date.now() + 10 * 60 * 1000
-    };
+    });
 
     // Envoie le code par DM Discord via le bot
     await discordUser.send(`🔐 Ton code de vérification Vinteo Import: **${code}**\n\nCe code est valide pendant 10 minutes.`);
@@ -439,14 +426,14 @@ app.post('/verify-code', async (req, res) => {
 
     console.log(`🔐 Vérification du code pour: ${discordId}`);
     
-    const stored = verificationCodes[discordId];
+    const stored = verificationCodes.get(discordId);
     
     if (!stored) {
       return res.json({ success: false, error: 'Pas de code trouvé. Renvoie un code d\'abord.' });
     }
 
     if (Date.now() > stored.expiresAt) {
-      delete verificationCodes[discordId];
+      verificationCodes.delete(discordId);
       return res.json({ success: false, error: 'Code expiré' });
     }
 
@@ -460,30 +447,30 @@ app.post('/verify-code', async (req, res) => {
       return res.json({ success: false, error: `Salon salon-${stored.username} non trouvé` });
     }
 
-    const REQUIRED_ROLE_ID = '1458129484036313118';
-    const guild = await discordClient.guilds.fetch(GUILD_ID);
+    const guild = await discordClient.guilds.fetch(SERVER_ID);
     const member = await guild.members.fetch(discordId);
-    if (!member.roles.cache.has(REQUIRED_ROLE_ID)) {
+    if (!member.roles.cache.has(ROLE_ID)) {
       return res.json({ success: false, error: 'Rôle requis non trouvé' });
     }
 
     // Génère une session permanente (sans expiration)
     const token = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    sessions[token] = {
+    sessions.set(token, {
       discordId: discordId,
       username: stored.username,
+      channel: channel.name,
       createdAt: Date.now()
-    };
+    });
 
-    delete verificationCodes[discordId];
+    verificationCodes.delete(discordId);
 
     console.log(`✅ Code vérifié! Token: ${token}`);
 
     res.json({ 
       success: true, 
-      message: 'Connecté!',
       token: token,
-      username: sessions[token].username,
+      username: stored.username,
+      channel: channel.name,
       discordId: discordId
     });
 
@@ -504,7 +491,7 @@ app.post('/check-session', async (req, res) => {
 
     console.log(`🔍 Vérification de session: ${token}`);
     
-    const session = sessions[token];
+    const session = sessions.get(token);
     
     if (!session) {
       return res.json({ authenticated: false, error: 'Token invalide' });
@@ -529,8 +516,8 @@ app.post('/logout', async (req, res) => {
   try {
     const { token } = req.body;
     
-    if (token && sessions[token]) {
-      delete sessions[token];
+    if (token && sessions.has(token)) {
+      sessions.delete(token);
       console.log(`👋 Logout: ${token}`);
     }
 
