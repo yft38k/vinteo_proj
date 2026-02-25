@@ -66,9 +66,8 @@ app.get('/api/images', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Non authentifié' });
     }
     const session = sessions[token];
-    if (!session || Date.now() - session.createdAt > 24 * 60 * 60 * 1000) {
-      if (session) delete sessions[token];
-      return res.status(401).json({ success: false, error: 'Session expirée ou invalide' });
+    if (!session) {
+      return res.status(401).json({ success: false, error: 'Session invalide' });
     }
 
     const { username } = session;
@@ -134,115 +133,66 @@ app.get('/api/images', async (req, res) => {
   }
 });
 
-// Route: Récupère le dernier message TEXTE du bot
+// Route: Récupère le dernier texte du salon utilisateur
 app.get('/api/text', async (req, res) => {
   try {
-    console.log('🔍 Recherche du dernier message du bot TEXTE...');
-    console.log(`   Channel ID: ${DISCORD_CHANNEL_ID}`);
-    console.log(`   Text Bot ID: ${TEXT_BOT_ID}`);
-    
-    let allMessages = [];
-    let lastMessageId = null;
-    const limit = 100;
-
-    const headers = {
-      'Authorization': `Bot ${DISCORD_TOKEN}`,
-      'Content-Type': 'application/json'
-    };
-    
-    for (let iteration = 0; iteration < 10; iteration++) {
-      let url = `${DISCORD_API_URL}/channels/${DISCORD_CHANNEL_ID}/messages?limit=${limit}`;
-      
-      if (lastMessageId) {
-        url += `&before=${lastMessageId}`;
-      }
-      
-      console.log(`\n   📥 Batch ${iteration + 1}...`);
-      
-      try {
-        const response = await axios.get(url, {
-          headers: headers,
-          timeout: 5000
-        });
-
-        const messages = response.data;
-        
-        if (!messages || messages.length === 0) {
-          console.log(`   ✓ Fin atteinte`);
-          break;
-        }
-
-        const botMessages = messages.filter(msg => msg.author.id === TEXT_BOT_ID);
-        console.log(`   📨 ${botMessages.length}/${messages.length} messages du bot TEXTE`);
-        
-        allMessages = allMessages.concat(botMessages);
-
-        lastMessageId = messages[messages.length - 1].id;
-        
-        if (allMessages.length >= 1000) {
-          console.log(`   ⚠️ Limite de 1000 messages atteinte`);
-          break;
-        }
-
-      } catch (error) {
-        console.error(`   ❌ Erreur batch:`, error.message);
-        if (error.response?.status === 401) {
-          throw new Error("❌ Token Discord invalide");
-        }
-        throw error;
-      }
+    // Vérification de l'authentification
+    const token = req.headers['authorization']?.replace('Bearer ', '') || req.query.token;
+    if (!token) {
+      return res.status(401).json({ success: false, error: 'Non authentifié' });
+    }
+    const session = sessions[token];
+    if (!session) {
+      return res.status(401).json({ success: false, error: 'Session invalide' });
     }
 
-    console.log(`\n   📊 Total: ${allMessages.length} messages du bot TEXTE`);
+    const { username } = session;
+    console.log(`🔍 Recherche texte pour salon-${username}...`);
 
-    if (allMessages.length === 0) {
-      console.log('   ❌ Aucun message du bot TEXTE trouvé');
-      return res.json({ 
-        success: false, 
-        message: "Aucun message du bot TEXTE trouvé" 
-      });
+    const channel = await getUserChannel(username);
+    if (!channel) {
+      return res.json({ success: false, message: `Salon salon-${username} non trouvé` });
     }
 
-    allMessages.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    const latestMessage = allMessages[0];
+    console.log(`   📢 Salon trouvé: ${channel.name} (${channel.id})`);
 
-    console.log(`\n   📌 Dernier message: ${latestMessage.id}`);
-    console.log(`   ⏰ Date: ${latestMessage.timestamp}`);
+    const messages = await channel.messages.fetch({ limit: 100 });
 
-    if (!latestMessage.content || latestMessage.content.trim().length === 0) {
-      console.log('   ❌ Message vide');
-      return res.json({ 
-        success: false, 
-        message: "Message TEXTE vide" 
-      });
+    const textBotMessages = messages
+      .filter(msg =>
+        msg.author.id === TEXT_BOT_ID &&
+        msg.content && msg.content.trim().length > 0
+      )
+      .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+
+    if (textBotMessages.size === 0) {
+      return res.json({ success: false, message: 'Aucun texte trouvé' });
     }
+
+    const latestMessage = textBotMessages.first();
+    console.log(`   📌 Dernier message texte: ${latestMessage.id}`);
 
     const lines = latestMessage.content.split('\n');
     const title = lines[0].trim();
     const description = lines.slice(1).join('\n').trim();
 
     console.log(`\n   📝 Titre: ${title.substring(0, 60)}...`);
-    console.log(`   📝 Description: ${description.substring(0, 60)}...`);
     console.log('\n   ✅ SUCCÈS!\n');
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       messageId: latestMessage.id,
       title: title,
       description: description
     });
 
   } catch (error) {
-    console.error('\n   ❌ ERREUR COMPLÈTE:', error.message);
-    console.error(error.stack);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    console.error('\n   ❌ ERREUR /api/text:', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Route: Récupère le dernier texte du salon utilisateur
+// Route: Récupère le dernier texte du salon utilisateur (alias)
 app.get('/api/textes', async (req, res) => {
   try {
     // Vérification de l'authentification
@@ -251,9 +201,8 @@ app.get('/api/textes', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Non authentifié' });
     }
     const session = sessions[token];
-    if (!session || Date.now() - session.createdAt > 24 * 60 * 60 * 1000) {
-      if (session) delete sessions[token];
-      return res.status(401).json({ success: false, error: 'Session expirée ou invalide' });
+    if (!session) {
+      return res.status(401).json({ success: false, error: 'Session invalide' });
     }
 
     const { username } = session;
@@ -505,7 +454,20 @@ app.post('/verify-code', async (req, res) => {
       return res.json({ success: false, error: 'Code incorrect' });
     }
 
-    // Code correct! Génère une session
+    // Code correct! Vérifier le salon et le rôle
+    const channel = await getUserChannel(stored.username);
+    if (!channel) {
+      return res.json({ success: false, error: `Salon salon-${stored.username} non trouvé` });
+    }
+
+    const REQUIRED_ROLE_ID = '1458129484036313118';
+    const guild = await discordClient.guilds.fetch(GUILD_ID);
+    const member = await guild.members.fetch(discordId);
+    if (!member.roles.cache.has(REQUIRED_ROLE_ID)) {
+      return res.json({ success: false, error: 'Rôle requis non trouvé' });
+    }
+
+    // Génère une session permanente (sans expiration)
     const token = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     sessions[token] = {
       discordId: discordId,
@@ -546,12 +508,6 @@ app.post('/check-session', async (req, res) => {
     
     if (!session) {
       return res.json({ authenticated: false, error: 'Token invalide' });
-    }
-
-    // Token valide pendant 24h
-    if (Date.now() - session.createdAt > 24 * 60 * 60 * 1000) {
-      delete sessions[token];
-      return res.json({ authenticated: false, error: 'Token expiré' });
     }
 
     console.log(`✅ Session valide pour: ${session.username}`);
